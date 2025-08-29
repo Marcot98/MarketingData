@@ -1,0 +1,302 @@
+{
+  "name": "Download, validate and Insert Ads_spend",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://drive.google.com/uc?export=download&id=1RXj_3txgmyX2Wyt9ZwM7l4axfi5A6EC-",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -16,
+        0
+      ],
+      "id": "2542edf6-4a87-4ffc-b1c4-df1c2a9046d6",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "options": {
+          "headerRow": true
+        }
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        192,
+        0
+      ],
+      "id": "7a3ddf88-b07f-4bb1-bb2e-beb9f19f4386",
+      "name": "Extract from File",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const key = r => [r.date, r.platform, r.account, r.campaign, r.country, r.device].join('|');\nconst best = new Map();\n\nfor (const item of items) {\n  const r = item.json;\n  const k = key(r);\n  const cur = best.get(k);\n\n  const score = (x) => (x.spend||0) + (x.clicks||0) + (x.impressions||0) + (x.conversions||0);\n  if (!cur || score(r) > score(cur) || (score(r) === score(cur) && new Date(r.load_date) > new Date(cur.load_date))) {\n    best.set(k, r);\n  }\n}\n\nreturn Array.from(best.values()).map(r => ({ json: r }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        0
+      ],
+      "id": "494da311-8797-4e49-81fe-f1cc6ee92896",
+      "name": "Clean before Insert"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Toma el nombre del archivo desde el nodo HTTP Request (binario 'data')\nconst sourceFileName =\n  $node[\"HTTP Request\"].binary?.data?.fileName ?? \"ads_spend.csv\";\n\nconst loadDate = new Date().toISOString();\n\nconst toInt = v => {\n  const n = parseInt(String(v).trim(), 10);\n  return Number.isFinite(n) ? n : 0;\n};\nconst toNum = v => {\n  const n = parseFloat(String(v).trim());\n  return Number.isFinite(n) ? n : 0;\n};\n\nreturn items.map(item => {\n  const r = item.json || {};\n  return {\n    json: {\n      date: r.date,\n      platform: String(r.platform ?? ''),\n      account: String(r.account ?? ''),\n      campaign: String(r.campaign ?? ''),\n      country: String(r.country ?? ''),\n      device: String(r.device ?? ''),\n      spend: toNum(r.spend),\n      clicks: toInt(r.clicks),\n      impressions: toInt(r.impressions),\n      conversions: toInt(r.conversions),\n      load_date: loadDate,\n      source_file_name: sourceFileName,\n    }\n  };\n});\n\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        0
+      ],
+      "id": "3ddb484a-a490-4e8c-9d3d-aa742928fb44",
+      "name": "Validate data type",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO marketing.ads_spend (\n  date, platform, account, campaign, country, device,\n  spend, clicks, impressions, conversions, load_date, source_file_name\n) VALUES (\n  '{{$json.date}}', '{{$json.platform}}', '{{$json.account}}',\n  '{{$json.campaign}}', '{{$json.country}}', '{{$json.device}}',\n  {{$json.spend}}, {{$json.clicks}}, {{$json.impressions}},\n  {{$json.conversions}}, '{{$json.load_date}}', '{{$json.source_file_name}}'\n)\nON CONFLICT (date, platform, account, campaign, country, device)\nDO UPDATE\nSET\n  spend        = GREATEST(EXCLUDED.spend,        marketing.ads_spend.spend),\n  clicks       = GREATEST(EXCLUDED.clicks,       marketing.ads_spend.clicks),\n  impressions  = GREATEST(EXCLUDED.impressions,  marketing.ads_spend.impressions),\n  conversions  = GREATEST(EXCLUDED.conversions,  marketing.ads_spend.conversions),\n  load_date        = EXCLUDED.load_date,\n  source_file_name = EXCLUDED.source_file_name\nWHERE\n  EXCLUDED.spend       > marketing.ads_spend.spend OR\n  EXCLUDED.clicks      > marketing.ads_spend.clicks OR\n  EXCLUDED.impressions > marketing.ads_spend.impressions OR\n  EXCLUDED.conversions > marketing.ads_spend.conversions;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        992,
+        0
+      ],
+      "id": "16618c68-6689-45d6-996b-2ccdcaa4ca17",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "cFp9pMBupZEzYXPK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 25
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -176,
+        0
+      ],
+      "id": "55a081e0-eeca-49ec-9083-b1860dfb5103",
+      "name": "Schedule Trigger",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO marketing.etl_run_log (rows_processed, source_file)\nVALUES ({{ $items().length }}, '{{$node[\"HTTP Request\"].binary.data.fileName || \"ads_spend.csv\"}}');\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1168,
+        0
+      ],
+      "id": "f3eee249-77a2-4de5-ad8d-57276f4c779d",
+      "name": "Execute a SQL query1",
+      "credentials": {
+        "postgres": {
+          "id": "cFp9pMBupZEzYXPK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0ce3df03-0f11-4fab-bb03-922302af79f2",
+              "leftValue": "={{ $json.platform }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "994c7b75-43af-4085-88bb-c0f38d0d84d3",
+              "leftValue": "={{ $json.account }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "676f84a1-68f6-407a-a285-43def397144c",
+              "leftValue": "={{ $json.campaign }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "85f63772-4299-41b4-8d24-0013f1a1e361",
+              "leftValue": "={{ $json.country }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "f76cd157-ee24-47aa-8e58-3026ade3bcea",
+              "leftValue": "={{ $json.device }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": false
+        }
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        608,
+        0
+      ],
+      "id": "209a283c-56f5-4c84-8274-9a3a422ecbef",
+      "name": "Filter"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Validate data type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Validate data type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean before Insert": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate data type": {
+      "main": [
+        [
+          {
+            "node": "Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query1": {
+      "main": [
+        []
+      ]
+    },
+    "Filter": {
+      "main": [
+        [
+          {
+            "node": "Clean before Insert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "335e0814-5972-4ac7-b7f6-fc955d679c3f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "10f877c559adacc9298fbd380969efd44c8225f76bfeab3ebab68111f86104ed"
+  },
+  "id": "tG3hnpO9uq16Z2vM",
+  "tags": []
+}
